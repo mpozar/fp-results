@@ -1,0 +1,13 @@
+{
+  "season": 2026,
+  "pot": 120,
+  "payouts": [60, 36, 20, 4],
+  "sheet_id": null,
+  "sheet_range": null,
+  "reveal": {
+    "timezone": "America/Los_Angeles",
+    "weekday": "Sunday",
+    "time": "10:00"
+  },
+  "handles": {}
+}
