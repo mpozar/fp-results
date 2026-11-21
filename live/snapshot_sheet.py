@@ -31,6 +31,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SNAP = ROOT / "live" / "snapshot.json"
 CONFIG = json.loads((ROOT / "config.json").read_text())
 SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+FROM_ESPN = {"ARI": "AZ"}  # ESPN's alias -> the pool's, where they differ
+GOOGLE_EPOCH = datetime(1899, 12, 30)  # sheets serial-number epoch, sheet-local
 
 
 def _iso(ts: str) -> str:
@@ -49,7 +51,8 @@ def fetch_week() -> tuple[int, list[dict]]:
     games = []
     for ev in j.get("events", []):
         comp = ev["competitions"][0]
-        teams = {c["homeAway"]: c["team"]["abbreviation"] for c in comp["competitors"]}
+        teams = {c["homeAway"]: FROM_ESPN.get(c["team"]["abbreviation"], c["team"]["abbreviation"])
+                 for c in comp["competitors"]}
         odds = (comp.get("odds") or [{}])[0]
         games.append({"gid": str(ev["id"]), "road": teams["away"], "home": teams["home"],
                       "startsAt": _iso(ev["date"]),
@@ -73,17 +76,107 @@ def slate_reveal(games: list[dict]) -> datetime:
         .astimezone(timezone.utc)
 
 
-def read_sheet_entries(revealed: set[str], all_revealed: bool) -> list[dict] | None:
-    """[{handle, tb, picks{gid: team}}] with ONLY revealed games' picks, and
-    tb only after the slate reveal — or None when no sheet is configured.
+def _sa_session():
+    from google.oauth2 import service_account
+    from google.auth.transport.requests import AuthorizedSession
+    raw = os.environ.get("GOOGLE_SA_KEY", "").strip()
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    if raw.startswith("{"):  # Actions: the secret is the key's content
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(raw), scopes=scopes)
+    else:  # local: a path to the key file
+        path = os.path.expanduser(raw or "~/.config/family-pool-sa.json")
+        creds = service_account.Credentials.from_service_account_file(path, scopes=scopes)
+    return AuthorizedSession(creds)
 
-    PENDING: the pool's submission sheet doesn't exist yet. When it does,
-    this reads it with the service-account key in the GOOGLE_SA_KEY secret,
-    keeps each entry's last pre-deadline submission, and filters as above.
+
+def read_sheet_entries(week: int, games: list[dict], all_locked: bool) -> list[dict] | None:
+    """[{handle, tb, picks{gid: team}}] from the private sheet — only revealed
+    games' picks, tb only after the slate reveal — or None with no sheet.
+
+    Submissions come from the append-only Log tab (one row per submission:
+    timestamp, week, username, G1..Gn picks, tiebreaker). Per game, an
+    entry's pick is their LAST valid submission before that game's deadline
+    (= its reveal time), so late edits to an already-locked game are ignored
+    while later games stay editable, and resubmissions otherwise win. The
+    'Week N' tab provides the roster (all entries, pickers or not) and the
+    G-column -> matchup mapping. Nothing read here is printed except counts.
     """
-    if not CONFIG.get("sheet_id"):
+    sid = CONFIG.get("sheet_id")
+    if not sid:
         return None
-    raise NotImplementedError("sheet format not wired up yet")
+    s = _sa_session()
+    base = f"https://sheets.googleapis.com/v4/spreadsheets/{sid}"
+    r = s.get(base + "?fields=properties.timeZone")
+    r.raise_for_status()
+    tz = ZoneInfo(r.json()["properties"]["timeZone"])
+
+    def values(rng: str, raw: bool = False) -> list[list]:
+        q = "?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER" if raw else ""
+        resp = s.get(f"{base}/values/{rng}{q}")
+        resp.raise_for_status()
+        return resp.json().get("values", [])
+
+    # G1..Gn column order is defined by the week tab's matchup header row
+    head = values(f"'Week {week}'!A1:Z1")
+    matchups = [c for c in (head[0] if head else []) if isinstance(c, str) and "@" in c]
+    by_teams = {frozenset((g["road"], g["home"])): g for g in games}
+    cols = []
+    for m in matchups:
+        a, h = (x.strip().upper() for x in m.split("@", 1))
+        g = by_teams.get(frozenset((a, h)))
+        if g is None:
+            raise RuntimeError(f"sheet matchup {m!r} is not on this week's schedule")
+        cols.append(g)
+    if len(cols) != len(games):
+        raise RuntimeError(f"sheet lists {len(cols)} games, the schedule has {len(games)}")
+    roster = [str(r0[0]).strip() for r0 in values(f"'Week {week}'!B3:B60") if r0 and str(r0[0]).strip()]
+
+    reveal = {g["gid"]: datetime.fromisoformat(g["lockAt"].replace("Z", "+00:00")) for g in games}
+    slate_rev = max(reveal.values())
+    subs: dict[str, list] = {}
+    for row in values("Log!A2:Z5000", raw=True):
+        if len(row) < 4 or not isinstance(row[0], (int, float)):
+            continue
+        try:
+            if int(row[1]) != week:
+                continue
+        except (TypeError, ValueError):
+            continue
+        ts = (GOOGLE_EPOCH + timedelta(days=float(row[0]))).replace(tzinfo=tz) \
+            .astimezone(timezone.utc)
+        user = str(row[2]).strip()
+        raw_picks = row[3:3 + len(cols)]
+        picks = [str(x).strip().upper() or None if isinstance(x, str) else None
+                 for x in raw_picks] + [None] * (len(cols) - len(raw_picks))
+        tb_cell = row[3 + len(cols)] if len(row) > 3 + len(cols) else None
+        tb = int(tb_cell) if isinstance(tb_cell, (int, float)) and not isinstance(tb_cell, bool) else None
+        subs.setdefault(user, []).append((ts, picks, tb))
+
+    entries = []
+    unknown = [u for u in subs if u not in roster]
+    for u in roster + unknown:  # unknown usernames surface instead of vanishing
+        rows = sorted(subs.get(u, []), key=lambda x: x[0])
+        picks_out = {}
+        for ci, g in enumerate(cols):
+            if not g["locked"]:
+                continue  # not revealed yet; never publish
+            team = None
+            for ts, pl, _ in rows:
+                if ts < reveal[g["gid"]] and pl[ci] in (g["road"], g["home"]):
+                    team = pl[ci]
+            if team:
+                picks_out[g["gid"]] = team
+        tb_out = None
+        if all_locked:
+            for ts, _, tbv in rows:
+                if ts < slate_rev and tbv is not None:
+                    tb_out = tbv
+        entries.append({"handle": u, "tb": tb_out, "picks": picks_out})
+    print(f"sheet: {len(roster)} roster entries, {len(subs)} submitted, "
+          f"{len(unknown)} unknown usernames, "
+          f"{sum(1 for e in entries if e['picks'])} with revealed picks")
+    return entries
 
 
 def main() -> None:
@@ -112,7 +205,7 @@ def main() -> None:
                           "locked": locked})
 
     all_locked = now >= reveal_all
-    entries = read_sheet_entries({g["gid"] for g in out_games if g["locked"]}, all_locked)
+    entries = read_sheet_entries(week, out_games, all_locked)
     if entries is None:
         print("no sheet configured; snapshot left untouched")
         return

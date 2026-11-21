@@ -1,8 +1,13 @@
 {
   "season": 2026,
   "pot": 120,
-  "payouts": [60, 36, 20, 4],
-  "sheet_id": null,
+  "payouts": [
+    60,
+    36,
+    20,
+    4
+  ],
+  "sheet_id": "1cXEbt31gWrxh-yU2S-Sv_Iyh6FJC1keINlfZ3dVRlQE",
   "sheet_range": null,
   "reveal": {
     "timezone": "America/Los_Angeles",

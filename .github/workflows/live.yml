@@ -65,9 +65,11 @@ jobs:
             if [ "$NEXT" -lt 0 ]; then echo "nothing pending; chain ends"; exit 0; fi
             if [ "$NEXT" -gt 0 ]; then
               if [ "$NEXT" -gt 86400 ]; then echo "next window ${NEXT}s away; chain ends"; exit 0; fi
-              if [ $((SECONDS + NEXT + 420)) -gt "$END" ]; then chain; exit 0; fi
-              sleep "$NEXT"
-              continue
+              REM=$((END - SECONDS - 420))
+              if [ "$NEXT" -le "$REM" ]; then sleep "$NEXT"; continue; fi
+              # longer than this job's budget: sleep the budget out, THEN hand off
+              [ "$REM" -gt 60 ] && sleep "$REM"
+              chain; exit 0
             fi
             python live/tick.py
             if [ -n "$(git status --porcelain)" ]; then
