@@ -14,5 +14,10 @@
     "weekday": "Sunday",
     "time": "10:00"
   },
-  "handles": {}
+  "handles": {},
+  "deadline_exempt": {
+    "11": [
+      "IND@HOU"
+    ]
+  }
 }

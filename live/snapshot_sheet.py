@@ -96,12 +96,14 @@ def read_sheet_entries(week: int, games: list[dict], all_locked: bool) -> list[d
 
     Submissions come from the append-only Log tab (one row per submission:
     timestamp, week, username, G1..Gn picks, tiebreaker). Per game, an
-    entry's pick is their LAST submission carrying a valid value for it.
-    Submission times are NOT checked: keeping an already-started game's pick
-    from changing is the submission process's job (per Mike, 2026-11-21),
-    not this reader's. The 'Week N' tab provides the roster (all entries,
-    pickers or not) and the G-column -> matchup mapping. Nothing read here
-    is printed except counts.
+    entry's pick is their LAST valid submission before that game's deadline
+    (its reveal time), so a Sunday-morning resubmission updates every
+    not-yet-started game while the already-played ones keep the earlier
+    value. config.json's deadline_exempt ({week: [matchups]}) waives the
+    deadline for specific games — used for week 11's Thursday game, whose
+    test submissions were transcribed after kickoff. The 'Week N' tab
+    provides the roster and the G-column -> matchup mapping. Nothing read
+    here is printed except counts.
     """
     sid = CONFIG.get("sheet_id")
     if not sid:
@@ -133,6 +135,9 @@ def read_sheet_entries(week: int, games: list[dict], all_locked: bool) -> list[d
         raise RuntimeError(f"sheet lists {len(cols)} games, the schedule has {len(games)}")
     roster = [str(r0[0]).strip() for r0 in values(f"'Week {week}'!B3:B60") if r0 and str(r0[0]).strip()]
 
+    reveal = {g["gid"]: datetime.fromisoformat(g["lockAt"].replace("Z", "+00:00")) for g in games}
+    slate_rev = max(reveal.values())
+    exempt = {m.strip().upper() for m in (CONFIG.get("deadline_exempt") or {}).get(str(week), [])}
     subs: dict[str, list] = {}
     for row in values("Log!A2:Z5000", raw=True):
         if len(row) < 4 or not isinstance(row[0], (int, float)):
@@ -161,15 +166,16 @@ def read_sheet_entries(week: int, games: list[dict], all_locked: bool) -> list[d
             if not g["locked"]:
                 continue  # not revealed yet; never publish
             team = None
+            no_deadline = f"{g['road']}@{g['home']}" in exempt
             for ts, pl, _ in rows:
-                if pl[ci] in (g["road"], g["home"]):
+                if (no_deadline or ts < reveal[g["gid"]]) and pl[ci] in (g["road"], g["home"]):
                     team = pl[ci]
             if team:
                 picks_out[g["gid"]] = team
         tb_out = None
         if all_locked:
             for ts, _, tbv in rows:
-                if tbv is not None:
+                if ts < slate_rev and tbv is not None:
                     tb_out = tbv
         entries.append({"handle": u, "tb": tb_out, "picks": picks_out})
     print(f"sheet: {len(roster)} roster entries, {len(subs)} submitted, "
