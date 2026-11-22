@@ -320,9 +320,12 @@ def gate(snap: dict) -> str | None:
     on a different week, or the settle hasn't been archived yet."""
     now = _now()
     state = load_state(snap["week"])
-    old_week = None
+    old_week, shown = None, -1
     try:
-        old_week = json.loads((ROOT / "data.json").read_text()).get("week")
+        pub = json.loads((ROOT / "data.json").read_text())
+        old_week = pub.get("week")
+        shown = sum(1 for e in pub.get("entries", [])
+                    for p in (e.get("picks") or []) if p)
     except (OSError, ValueError):
         pass
     n_picked = sum(1 for e in snap["entries"] if e["picks"])
@@ -334,6 +337,11 @@ def gate(snap: dict) -> str | None:
         return None
     if old_week != snap["week"]:
         return "page on another week"
+    avail = sum(len(e["picks"]) for e in snap["entries"])
+    if avail != shown:
+        # picks can reveal between game windows too (late sheet rows for an
+        # already-started game, a deadline exemption): publish them
+        return f"revealed picks changed ({shown} shown, {avail} available)"
     for g in snap["games"]:
         start = _iso(g["startsAt"])
         if timedelta(0) <= start - now <= timedelta(minutes=45):
