@@ -58,6 +58,10 @@ jobs:
             return 1
           }
           while :; do
+            # everything uncommitted here is machine-written and regenerated
+            # below; discard it so a pull can never autostash-conflict and
+            # leave conflict markers in snapshot.json (seen 2026-11-22)
+            git checkout -q -- . || true
             git pull -q --rebase --autostash || true
             python live/snapshot_sheet.py || echo "::warning::snapshot refresh failed; ticking with the last good snapshot"
             NEXT=$(python live/tick.py --next)
